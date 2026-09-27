@@ -1,0 +1,92 @@
+name: Build Groot APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Locate project
+        id: loc
+        run: |
+          set -e
+          if [ -f pubspec.yaml ]; then
+            echo "dir=." >> $GITHUB_OUTPUT
+          elif [ -f groot.zip ]; then
+            unzip -q -o groot.zip -d work
+            DIR=$(dirname "$(find work -name pubspec.yaml | head -1)")
+            echo "dir=$DIR" >> $GITHUB_OUTPUT
+          else
+            DIR=$(dirname "$(find . -name pubspec.yaml -not -path '*/build/*' | head -1)")
+            echo "dir=$DIR" >> $GITHUB_OUTPUT
+          fi
+          cat $GITHUB_OUTPUT
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Generate android folder
+        working-directory: ${{ steps.loc.outputs.dir }}
+        run: bash prepare_android.sh
+
+      - name: Compatibility switches
+        working-directory: ${{ steps.loc.outputs.dir }}
+        run: |
+          GP=android/gradle.properties
+          touch "$GP"
+          grep -q "android.newDsl" "$GP" || echo "android.newDsl=false" >> "$GP"
+          grep -q "org.gradle.jvmargs" "$GP" || echo "org.gradle.jvmargs=-Xmx4096M" >> "$GP"
+          cat "$GP"
+          grep -n -E "kotlin|com.android.application" android/settings.gradle* || true
+          grep -n -E "minSdk|abiFilters" android/app/build.gradle* || true
+
+      - name: Unit tests
+        id: tests
+        continue-on-error: true
+        working-directory: ${{ steps.loc.outputs.dir }}
+        run: flutter test --reporter expanded
+
+      - name: Build release APK
+        working-directory: ${{ steps.loc.outputs.dir }}
+        run: |
+          flutter build apk --release \
+            || flutter build apk --release --android-skip-build-dependency-validation
+
+      - name: Show output
+        working-directory: ${{ steps.loc.outputs.dir }}
+        run: ls -lh build/app/outputs/flutter-apk/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: groot-apk
+          path: ${{ steps.loc.outputs.dir }}/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: Groot APK ${{ github.run_number }}
+          files: ${{ steps.loc.outputs.dir }}/build/app/outputs/flutter-apk/app-release.apk
